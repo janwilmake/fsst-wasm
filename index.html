@@ -38,8 +38,196 @@
         };
     </script>
 
-    <script type="module">
-        import { default as runTest } from './example.js';
+    <!-- Load the WASM module with a custom loader -->
+    <script>
+        // Create a loading status indicator
+        console.log("Loading FSST WebAssembly module...");
+
+        // Load the FSST module
+        const script = document.createElement('script');
+        script.src = 'fsst.js';
+        script.onload = () => {
+            console.log("FSST module script loaded, initializing...");
+
+            // Run the test when the module is ready
+            runTest().catch(err => {
+                console.error('Error running FSST test:', err);
+            });
+        };
+        script.onerror = () => {
+            console.error("Failed to load FSST module script!");
+            console.error("Make sure fsst.js exists in the same directory as this HTML file");
+        };
+        document.head.appendChild(script);
+
+        async function runTest() {
+            // Wait for the FSST module to initialize
+            if (typeof FSST === 'undefined') {
+                console.log("Waiting for FSST module to be defined...");
+                await new Promise(resolve => {
+                    const checkInterval = setInterval(() => {
+                        if (typeof FSST !== 'undefined') {
+                            clearInterval(checkInterval);
+                            resolve();
+                        }
+                    }, 100);
+                });
+            }
+
+            console.log('Initializing FSST module...');
+            const fsstModule = await FSST();
+            console.log('FSST module initialized!');
+
+            // Create function wrappers
+            const createEncoderFn = fsstModule.cwrap('fsst_create_encoder', 'number', ['number', 'number', 'number', 'number']);
+            const freeEncoderFn = fsstModule.cwrap('fsst_free_encoder', 'void', ['number']);
+            const exportEncoderFn = fsstModule.cwrap('fsst_export_encoder', 'number', ['number', 'number']);
+            const importDecoderFn = fsstModule.cwrap('fsst_import_decoder', 'number', ['number', 'number']);
+            const compressFn = fsstModule.cwrap('fsst_compress', 'number', ['number', 'number', 'number', 'number', 'number']);
+            const decompressFn = fsstModule.cwrap('fsst_decompress', 'number', ['number', 'number', 'number', 'number', 'number']);
+
+            console.log('Creating encoder with sample data...');
+
+            // Sample data
+            const samples = [
+                'This is an example string for compression',
+                'Another example with some similar text',
+                'FSST works best with data that has repeating patterns',
+                'The more representative your samples, the better compression you get'
+            ].map(str => new TextEncoder().encode(str));
+
+            // Create and fill pointer arrays
+            const stringsPtr = fsstModule._malloc(samples.length * 4);
+            const lengthsPtr = fsstModule._malloc(samples.length * 4);
+
+            const stringPtrs = [];
+
+            // Allocate and copy each sample
+            for (let i = 0; i < samples.length; i++) {
+                const sample = samples[i];
+                const samplePtr = fsstModule._malloc(sample.length);
+                fsstModule.writeArrayToMemory(sample, samplePtr);
+                stringPtrs.push(samplePtr);
+
+                // Write string pointer and length to arrays
+                fsstModule.setValue(stringsPtr + i * 4, samplePtr, 'i32');
+                fsstModule.setValue(lengthsPtr + i * 4, sample.length, 'i32');
+            }
+
+            // Create the encoder
+            const encoderPtr = createEncoderFn(stringsPtr, lengthsPtr, samples.length, 0);
+
+            // Free temporary memory
+            for (const ptr of stringPtrs) {
+                fsstModule._free(ptr);
+            }
+            fsstModule._free(stringsPtr);
+            fsstModule._free(lengthsPtr);
+
+            if (encoderPtr === 0) {
+                throw new Error('Failed to create FSST encoder');
+            }
+
+            // Test compression
+            const testString = 'This is a test string with some compression patterns similar to the samples';
+            const inputData = new TextEncoder().encode(testString);
+
+            console.log(`Original size: ${inputData.length} bytes`);
+
+            // Compress the data
+            console.time('Compression');
+
+            // Allocate memory for input
+            const inputPtr = fsstModule._malloc(inputData.length);
+            fsstModule.writeArrayToMemory(inputData, inputPtr);
+
+            // Allocate memory for output (assume worst case: 2x input size)
+            const outputMaxLength = inputData.length * 2;
+            const outputPtr = fsstModule._malloc(outputMaxLength);
+
+            // Compress the data
+            const outputLength = compressFn(encoderPtr, inputPtr, inputData.length, outputPtr, outputMaxLength);
+
+            // Copy the result to a new buffer
+            const compressed = new Uint8Array(outputLength);
+            compressed.set(fsstModule.HEAPU8.subarray(outputPtr, outputPtr + outputLength));
+
+            // Free temporary memory
+            fsstModule._free(inputPtr);
+            fsstModule._free(outputPtr);
+
+            console.timeEnd('Compression');
+
+            console.log(`Compressed size: ${compressed.length} bytes`);
+            console.log(`Compression ratio: ${(inputData.length / compressed.length).toFixed(2)}x`);
+
+            // Export encoder
+            const bufferSize = 4096;
+            const bufferPtr = fsstModule._malloc(bufferSize);
+
+            // Export the encoder
+            const exportSize = exportEncoderFn(encoderPtr, bufferPtr);
+
+            // Copy the result to a new buffer
+            const exportedEncoder = new Uint8Array(exportSize);
+            exportedEncoder.set(fsstModule.HEAPU8.subarray(bufferPtr, bufferPtr + exportSize));
+
+            // Free temporary memory
+            fsstModule._free(bufferPtr);
+
+            console.log(`Exported encoder size: ${exportedEncoder.length} bytes`);
+
+            // Create decoder from exported encoder
+            const decoderPtr = fsstModule._malloc(8 * 256 + 256);
+            const encoderDataPtr = fsstModule._malloc(exportedEncoder.length);
+
+            // Copy encoder data
+            fsstModule.writeArrayToMemory(exportedEncoder, encoderDataPtr);
+
+            // Import the decoder
+            const importSize = importDecoderFn(decoderPtr, encoderDataPtr);
+
+            // Free temporary buffer
+            fsstModule._free(encoderDataPtr);
+
+            if (importSize === 0) {
+                fsstModule._free(decoderPtr);
+                throw new Error('Failed to create FSST decoder: invalid encoder data');
+            }
+
+            // Decompress the data
+            console.time('Decompression');
+
+            // Allocate memory for input and output
+            const compressedPtr = fsstModule._malloc(compressed.length);
+            const maxOutputSize = inputData.length * 4;
+            const decompressedPtr = fsstModule._malloc(maxOutputSize);
+
+            // Copy input data
+            fsstModule.writeArrayToMemory(compressed, compressedPtr);
+
+            // Decompress
+            const decompressedLength = decompressFn(decoderPtr, compressedPtr, compressed.length, decompressedPtr, maxOutputSize);
+
+            // Copy result
+            const decompressed = new Uint8Array(decompressedLength);
+            decompressed.set(fsstModule.HEAPU8.subarray(decompressedPtr, decompressedPtr + decompressedLength));
+
+            // Free temporary memory
+            fsstModule._free(compressedPtr);
+            fsstModule._free(decompressedPtr);
+
+            console.timeEnd('Decompression');
+
+            // Check if decompression was successful
+            const decompressedString = new TextDecoder().decode(decompressed);
+            console.log('Decompression successful:', decompressedString === testString);
+            console.log('Decompressed text:', decompressedString);
+
+            // Clean up
+            freeEncoderFn(encoderPtr);
+            fsstModule._free(decoderPtr);
+        }
     </script>
 </body>
 
