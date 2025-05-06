@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>FSST WebAssembly Test</title>
+</head>
+
+<body>
+    <h1>FSST WebAssembly Test</h1>
+    <pre id="output"></pre>
+
+    <script>
+        // Redirect console output to the pre element
+        const output = document.getElementById('output');
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalTime = console.time;
+        const originalTimeEnd = console.timeEnd;
+
+        console.log = function (...args) {
+            originalLog.apply(console, args);
+            output.textContent += args.join(' ') + '\n';
+        };
+
+        console.error = function (...args) {
+            originalError.apply(console, args);
+            output.textContent += 'ERROR: ' + args.join(' ') + '\n';
+        };
+
+        console.time = function (label) {
+            originalTime.apply(console, [label]);
+            output.textContent += `Started timer: ${label}\n`;
+        };
+
+        console.timeEnd = function (label) {
+            originalTimeEnd.apply(console, [label]);
+            output.textContent += `Ended timer: ${label}\n`;
+        };
+    </script>
+
+    <script type="module">
+        import { default as runTest } from './example.js';
+    </script>
+</body>
+
+</html>
